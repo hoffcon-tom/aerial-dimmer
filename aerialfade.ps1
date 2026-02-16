@@ -67,6 +67,15 @@ function Ensure-MagickAvailable {
     }
 }
 
+function Format-Clock {
+    param(
+        [Parameter(Mandatory = $true)]
+        [double]$Seconds
+    )
+
+    [TimeSpan]::FromSeconds([Math]::Max(0, [Math]::Round($Seconds))).ToString('hh\:mm\:ss')
+}
+
 $targetFolder = Resolve-TargetFolder -RawInput $InputPath
 $jpgFiles = @(Get-JpegFiles -Path $targetFolder)
 if (-not $jpgFiles) {
@@ -119,7 +128,25 @@ if (-not $sourceJpgFiles) {
     throw "Backup folder exists but has no JPG/JPEG files: $originalDir"
 }
 
+$totalImages = $sourceJpgFiles.Count
+$showProgress = $totalImages -gt 10
+$processed = 0
+$timer = $null
+if ($showProgress) {
+    $timer = [System.Diagnostics.Stopwatch]::StartNew()
+}
+
 foreach ($src in $sourceJpgFiles) {
+    $processed++
+    if ($showProgress) {
+        $elapsedSeconds = $timer.Elapsed.TotalSeconds
+        $secondsPerImage = if ($processed -gt 0) { $elapsedSeconds / $processed } else { 0 }
+        $remainingSeconds = $secondsPerImage * ($totalImages - $processed)
+        $percentComplete = [int](($processed / $totalImages) * 100)
+        $status = "$processed / $totalImages | elapsed $(Format-Clock -Seconds $elapsedSeconds) | remaining $(Format-Clock -Seconds $remainingSeconds)"
+        Write-Progress -Activity "Fading aerial images" -Status $status -PercentComplete $percentComplete
+    }
+
     $dstPath = Join-Path -Path $targetFolder -ChildPath $src.Name
     $tmpOut = Join-Path -Path $targetFolder -ChildPath ($src.BaseName + '.tmp-aerialfade-' + [Guid]::NewGuid().ToString('N') + '.jpg')
     try {
@@ -135,6 +162,11 @@ foreach ($src in $sourceJpgFiles) {
             Remove-Item -LiteralPath $tmpOut -Force -ErrorAction SilentlyContinue
         }
     }
+}
+
+if ($showProgress) {
+    $timer.Stop()
+    Write-Progress -Activity "Fading aerial images" -Completed
 }
 
 Write-Host "Faded $($sourceJpgFiles.Count) image(s) to ${fadePercent}% in: $targetFolder"
