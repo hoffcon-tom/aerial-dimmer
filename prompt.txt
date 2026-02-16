@@ -1,0 +1,39 @@
+# Aerial Image Fader 
+
+Purpose: make a script to fade out aerial images in dwg  for use in CAD programs as background images.
+
+Make script in batch or powershell
+
+API:
+
+aerialfade auckland-0075m-urban-aerial-photos-2024-2025.dwg 60
+aerialfade auckland-0075m-urban-aerial-photos-2024-2025 50
+aerialfade auckland-0075m-urban-aerial-photos-2024-2025 restore
+aerialfade auckland-0075m-urban-aerial-photos-2024-2025 0
+
+Behaviour:
+
+If called with a dwg file as input, operate in the subfolder with the same name as the dwg
+If called with a folder operate in that folder.
+
+Check if the folder is valid (contains jpg files) before continuing
+
+
+
+Steps:
+
+1. Backup Originals
+If no 'original' subfolder present, make it and copy the jpeg files as a backup. 
+If it is present then move on
+
+2. Fade  Images
+Use ImageMagick to fade out the jpeg files in the folder. to a percentage set by the user e.g 50.
+
+
+
+Restoring Images
+If restore of fade=0 passed in, restore the original images
+Copy the jpg files from the original subfolder and overwrite the originals in the workdir
+Fail with error message if original folder not present or no jpgs
+
+
