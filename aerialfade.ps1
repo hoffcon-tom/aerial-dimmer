@@ -16,7 +16,7 @@ function Get-JpegFiles {
     )
 
     Get-ChildItem -Path $Path -File | Where-Object {
-        $_.Extension -match '^\.(jpe?g)$' -and $_.Name -notlike '*.tmp-aerialfade.jpg'
+        $_.Extension -match '^\.(jpe?g)$' -and $_.Name -notlike '*.tmp-aerialfade-*.jpg'
     }
 }
 
@@ -130,36 +130,120 @@ if (-not $sourceJpgFiles) {
 
 $totalImages = $sourceJpgFiles.Count
 $showProgress = $totalImages -gt 10
+$parallelThreshold = 2
+$useParallel = $totalImages -gt $parallelThreshold
 $processed = 0
 $timer = $null
 if ($showProgress) {
     $timer = [System.Diagnostics.Stopwatch]::StartNew()
 }
 
-foreach ($src in $sourceJpgFiles) {
-    $processed++
-    if ($showProgress) {
-        $elapsedSeconds = $timer.Elapsed.TotalSeconds
-        $secondsPerImage = if ($processed -gt 0) { $elapsedSeconds / $processed } else { 0 }
-        $remainingSeconds = $secondsPerImage * ($totalImages - $processed)
-        $percentComplete = [int](($processed / $totalImages) * 100)
-        $status = "$processed / $totalImages | elapsed $(Format-Clock -Seconds $elapsedSeconds) | remaining $(Format-Clock -Seconds $remainingSeconds)"
-        Write-Progress -Activity "Fading aerial images" -Status $status -PercentComplete $percentComplete
-    }
+if ($useParallel) {
+    $maxWorkers = [Math]::Min([Math]::Max(2, [Environment]::ProcessorCount), $totalImages)
+    $jobs = @()
+    $nextIndex = 0
+    $processed = 0
 
-    $dstPath = Join-Path -Path $targetFolder -ChildPath $src.Name
-    $tmpOut = Join-Path -Path $targetFolder -ChildPath ($src.BaseName + '.tmp-aerialfade-' + [Guid]::NewGuid().ToString('N') + '.jpg')
-    try {
-        & magick "$($src.FullName)" -fill white -colorize "${fadePercent}%" "$tmpOut"
-        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $tmpOut -PathType Leaf)) {
-            throw "ImageMagick failed processing: $($src.FullName)"
+    while ($processed -lt $totalImages) {
+        while (($jobs.Count -lt $maxWorkers) -and ($nextIndex -lt $totalImages)) {
+            $src = $sourceJpgFiles[$nextIndex]
+            $dstPath = Join-Path -Path $targetFolder -ChildPath $src.Name
+
+            $job = Start-Job -Name ("aerialfade-" + $nextIndex) -ScriptBlock {
+                param(
+                    [string]$SourcePath,
+                    [string]$DestPath,
+                    [int]$Fade,
+                    [string]$Folder
+                )
+
+                $tmpOut = Join-Path -Path $Folder -ChildPath ([System.IO.Path]::GetFileNameWithoutExtension($DestPath) + '.tmp-aerialfade-' + [Guid]::NewGuid().ToString('N') + '.jpg')
+                try {
+                    & magick "$SourcePath" -fill white -colorize "${Fade}%" "$tmpOut"
+                    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $tmpOut -PathType Leaf)) {
+                        throw "ImageMagick failed processing: $SourcePath"
+                    }
+
+                    Move-Item -LiteralPath $tmpOut -Destination $DestPath -Force
+                }
+                finally {
+                    if (Test-Path -LiteralPath $tmpOut -PathType Leaf) {
+                        Remove-Item -LiteralPath $tmpOut -Force -ErrorAction SilentlyContinue
+                    }
+                }
+            } -ArgumentList $src.FullName, $dstPath, $fadePercent, $targetFolder
+
+            $jobs += $job
+            $nextIndex++
         }
 
-        Move-Item -LiteralPath $tmpOut -Destination $dstPath -Force
+        $finished = Wait-Job -Job $jobs -Any -Timeout 1
+        if (-not $finished) {
+            continue
+        }
+
+        $jobError = $null
+        Receive-Job -Job $finished -ErrorAction SilentlyContinue -ErrorVariable jobError | Out-Null
+        if ($finished.State -ne 'Completed' -or $jobError) {
+            $reason = if ($jobError) {
+                ($jobError | ForEach-Object { $_.Exception.Message }) -join '; '
+            }
+            elseif ($finished.ChildJobs[0].JobStateInfo.Reason) {
+                $finished.ChildJobs[0].JobStateInfo.Reason.Message
+            }
+            else {
+                "Unknown job failure"
+            }
+
+            $remainingJobs = @($jobs | Where-Object { $_.Id -ne $finished.Id })
+            if ($remainingJobs) {
+                Stop-Job -Job $remainingJobs -ErrorAction SilentlyContinue
+                Remove-Job -Job $remainingJobs -Force -ErrorAction SilentlyContinue
+            }
+            Remove-Job -Job $finished -Force -ErrorAction SilentlyContinue
+            throw "Image processing failed: $reason"
+        }
+
+        $processed++
+        Remove-Job -Job $finished -Force -ErrorAction SilentlyContinue
+        $jobs = @($jobs | Where-Object { $_.Id -ne $finished.Id })
+
+        if ($showProgress) {
+            $elapsedSeconds = $timer.Elapsed.TotalSeconds
+            $secondsPerImage = if ($processed -gt 0) { $elapsedSeconds / $processed } else { 0 }
+            $remainingSeconds = $secondsPerImage * ($totalImages - $processed)
+            $percentComplete = [int](($processed / $totalImages) * 100)
+            $status = "$processed / $totalImages | elapsed $(Format-Clock -Seconds $elapsedSeconds) | remaining $(Format-Clock -Seconds $remainingSeconds)"
+            Write-Progress -Activity "Fading aerial images" -Status $status -PercentComplete $percentComplete
+        }
     }
-    finally {
-        if (Test-Path -LiteralPath $tmpOut -PathType Leaf) {
-            Remove-Item -LiteralPath $tmpOut -Force -ErrorAction SilentlyContinue
+}
+else {
+    foreach ($src in $sourceJpgFiles) {
+        $processed++
+        if ($showProgress) {
+            $elapsedSeconds = $timer.Elapsed.TotalSeconds
+            $secondsPerImage = if ($processed -gt 0) { $elapsedSeconds / $processed } else { 0 }
+            $remainingSeconds = $secondsPerImage * ($totalImages - $processed)
+            $percentComplete = [int](($processed / $totalImages) * 100)
+            $status = "$processed / $totalImages | elapsed $(Format-Clock -Seconds $elapsedSeconds) | remaining $(Format-Clock -Seconds $remainingSeconds)"
+            Write-Progress -Activity "Fading aerial images" -Status $status -PercentComplete $percentComplete
+        }
+
+        $dstPath = Join-Path -Path $targetFolder -ChildPath $src.Name
+        $tmpOut = Join-Path -Path $targetFolder -ChildPath ($src.BaseName + '.tmp-aerialfade-' + [Guid]::NewGuid().ToString('N') + '.jpg')
+        try {
+            & magick "$($src.FullName)" -fill white -colorize "${fadePercent}%" "$tmpOut"
+            if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $tmpOut -PathType Leaf)) {
+                throw "ImageMagick failed processing: $($src.FullName)"
+            }
+
+            Move-Item -LiteralPath $tmpOut -Destination $dstPath -Force
+        }
+        finally {
+            if (Test-Path -LiteralPath $tmpOut -PathType Leaf) {
+                Remove-Item -LiteralPath $tmpOut -Force -ErrorAction SilentlyContinue
+            }
         }
     }
 }
